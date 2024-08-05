@@ -1,0 +1,18 @@
+api = "0.10"
+
+[buildpack]
+id = "eagle-io/chrome-buildpack"
+version = "0.0.1"
+name = "Chrome Buildpack"
+homepage = "https://github.com/eagle-io/chrome-buildpack"
+description = "Installs chrome and dependencies"
+keywords = ["chrome", "packages", "ubuntu"]
+
+[[buildpack.licenses]]
+type = "MIT"
+
+[[stacks]]
+id = "io.buildpacks.stacks.jammy"
+
+[[stacks]]
+id = "*"

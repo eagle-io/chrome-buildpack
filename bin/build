@@ -1,0 +1,180 @@
+#!/usr/bin/env bash
+# bin/build $CNB_LAYERS_DIR $CNB_PLATFORM_DIR $CNB_BP_PLAN_PATH
+set -eo pipefail
+
+function error() {
+  echo " !     $*" >&2
+  exit 1
+}
+
+function topic() {
+  echo "-----> $*"
+}
+
+function indent() {
+  c='s/^/       /'
+  case $(uname) in
+    Darwin) sed -l "$c";;
+    *)      sed -u "$c";;
+  esac
+}
+
+function purgeCache() {
+  topic "Purging cache"
+  local cache_dir=$1
+  rm -rf "${cache_dir}/apt"
+  rm -rf "${cache_dir}/archives"
+  rm -rf "${cache_dir}/lists"
+  touch "${cache_dir}/PURGED_CACHE"
+}
+
+start_time=$(date +%s)
+
+echo "Chrome Buildpack"
+
+# Set user provided env vars
+if compgen -G "${CNB_PLATFORM_DIR}/env/*" > /dev/null; then
+ for var in ${CNB_PLATFORM_DIR}/env/*; do
+   declare "$(basename ${var})=$(<${var})"
+ done
+fi
+
+LAYER_PATH=$CNB_LAYERS_DIR/chrome
+CACHE_DIR=$CNB_LAYERS_DIR/chrome/cache
+
+mkdir -p $LAYER_PATH
+mkdir -p $CACHE_DIR
+
+# Purge cache as required
+if [ ! -f $CACHE_DIR/PURGED_CACHE ] ||  [[ $BP_CHROME_NO_CACHE == true ]]; then
+  purgeCache $CACHE_DIR
+fi
+
+# Detect requested channel or default to stable
+if [ -z "$BP_CHROME_CHANNEL" ]; then
+  BP_CHROME_CHANNEL=stable
+fi
+
+# Setup bin location for desired channel
+case "$BP_CHROME_CHANNEL" in
+  "stable")
+    BIN=chrome/chrome
+    ;;
+  "beta")
+    BIN=chrome-beta/chrome
+    ;;
+  "unstable")
+    BIN=chrome-unstable/chrome
+    ;;
+  *)
+    error "BP_CHROME_CHANNEL must be 'stable', 'beta', or 'unstable', not '$BP_CHROME_CHANNEL'."
+    ;;
+esac
+
+topic "Installing Chrome [$BP_CHROME_CHANNEL]."
+
+# Optionally install chrome linux dependencies
+if [[ $BP_CHROME_INSTALL_DEPS == true ]]; then
+  topic "Chrome dependencies will be installed."
+  PACKAGES="
+    gconf-service
+    libappindicator1
+    libasound2
+    libatk1.0-0
+    libatk-bridge2.0-0
+    libcairo-gobject2
+    libdrm2
+    libgbm1
+    libgconf-2-4
+    libgtk-3-0
+    libnspr4
+    libnss3
+    libx11-xcb1
+    libxcb-dri3-0
+    libxcomposite1
+    libxcursor1
+    libxdamage1
+    libxfixes3
+    libxi6
+    libxinerama1
+    libxrandr2
+    libxshmfence1
+    libxss1
+    libxtst6
+    fonts-liberation
+  "
+fi
+
+# Packages to install
+PACKAGES="$PACKAGES https://dl.google.com/linux/direct/google-chrome-${BP_CHROME_CHANNEL}_current_amd64.deb"
+
+APT_CACHE_DIR="$CACHE_DIR/apt/cache"
+APT_STATE_DIR="$CACHE_DIR/apt/state"
+APT_OPTIONS="-o debug::nolocking=true -o dir::cache=$APT_CACHE_DIR -o dir::state=$APT_STATE_DIR"
+APT_VERSION=$(apt-get -v | awk 'NR == 1{ print $2 }')
+
+case "$APT_VERSION" in
+  0* | 1.0*) APT_FORCE_YES="--force-yes";;
+  *)         APT_FORCE_YES="--allow-downgrades --allow-remove-essential --allow-change-held-packages";;
+esac
+
+mkdir -p "$APT_CACHE_DIR/archives/partial"
+mkdir -p "$APT_STATE_DIR/lists/partial"
+
+topic "Updating apt caches"
+# Ignore stderr from apt-get update containing: rm: cannot remove '/var/cache/apt/archives/partial/*.deb': Permission denied
+apt-get $APT_OPTIONS update 2> >(grep -v "rm: cannot remove") | indent
+
+for PACKAGE in $PACKAGES; do
+  if [[ $PACKAGE == *deb ]]; then
+    PACKAGE_NAME=$(basename $PACKAGE .deb)
+    PACKAGE_FILE=$APT_CACHE_DIR/archives/$PACKAGE_NAME.deb
+    topic "Fetching $PACKAGE"
+    curl --silent --show-error --fail -L -z $PACKAGE_FILE -o $PACKAGE_FILE $PACKAGE 2>&1 | indent
+  else
+    topic "Fetching .debs for $PACKAGE"
+    apt-get $APT_OPTIONS -y $APT_FORCE_YES -d install --reinstall $PACKAGE | indent
+  fi
+done
+
+for DEB in $(ls -1 $APT_CACHE_DIR/archives/*.deb); do
+  topic "Installing $(basename $DEB)"
+  dpkg -x $DEB $LAYER_PATH/
+done
+
+# Add environment variables
+mkdir -p "$LAYER_PATH/env"
+echo -n "$LAYER_PATH/usr/bin" > "$LAYER_PATH/env/PATH.prepend"
+echo -n "$LAYER_PATH/usr/lib/x86_64-linux-gnu:$LAYER_PATH/usr/lib/i386-linux-gnu:$LAYER_PATH/usr/lib" > "$LAYER_PATH/env/LD_LIBRARY_PATH.prepend"
+echo -n "$LAYER_PATH/usr/lib/x86_64-linux-gnu:$LAYER_PATH/usr/lib/i386-linux-gnu:$LAYER_PATH/usr/lib" > "$LAYER_PATH/env/LIBRARY_PATH.prepend"
+echo -n "$LAYER_PATH/usr/include:$LAYER_PATH/usr/include/x86_64-linux-gnu" > "$LAYER_PATH/env/INCLUDE_PATH.prepend"
+echo -n "$LAYER_PATH/usr/include:$LAYER_PATH/usr/include/x86_64-linux-gnu" > "$LAYER_PATH/env/CPATH.prepend"
+echo -n "$LAYER_PATH/usr/include:$LAYER_PATH/usr/include/x86_64-linux-gnu" > "$LAYER_PATH/env/CPPPATH.prepend"
+echo -n "$LAYER_PATH/usr/lib/x86_64-linux-gnu/pkgconfig:$LAYER_PATH/usr/lib/i386-linux-gnu/pkgconfig:$LAYER_PATH/usr/lib/pkgconfig" > "$LAYER_PATH/env/PKG_CONFIG_PATH.prepend"
+echo -n "$LAYER_PATH/opt/google/$BIN" > "$LAYER_PATH/env/CHROME_BIN"
+
+topic "Rewrite package-config files"
+find $LAYER_PATH -type f -ipath '*/pkgconfig/*.pc' | xargs --no-run-if-empty -n 1 sed -i -e 's!^prefix=\(.*\)$!prefix='"$LAYER_PATH"'\1!g'
+
+# Add symlink
+SYMLINK_PATH=$LAYER_PATH/bin/chrome
+mkdir -p "$LAYER_PATH/bin"
+ln -s "$LAYER_PATH/opt/google/$BIN" $SYMLINK_PATH
+
+topic "Chrome [$BP_CHROME_CHANNEL] executable path: $SYMLINK_PATH"
+
+# Purge cache as required
+if [[ $BP_CHROME_NO_CACHE == true ]]; then
+  purgeCache $CACHE_DIR
+fi
+
+# Create layer TOML
+cat >> ${LAYER_PATH}.toml <<EOL
+[types]
+launch = true
+build = true
+cache = false
+EOL
+
+end_time=$(date +%s)
+echo "Completed in $(( $end_time - $start_time ))s" | indent

@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# bin/build $CNB_LAYERS_DIR $CNB_PLATFORM_DIR $CNB_BP_PLAN_PATH
+set -eo pipefail
+
+echo "Chrome Buildpack"
+exit 0
