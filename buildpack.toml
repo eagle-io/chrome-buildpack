@@ -2,7 +2,7 @@ api = "0.10"
 
 [buildpack]
 id = "eagle-io/chrome-buildpack"
-version = "0.0.2"
+version = "0.0.3"
 name = "Chrome Buildpack"
 homepage = "https://github.com/eagle-io/chrome-buildpack"
 description = "Installs chrome and dependencies"
